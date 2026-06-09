@@ -22,9 +22,9 @@ This is particularly useful for:
 
 Before implementing mTLS, you need:
 
-1. **Trust Config Resource**: A Google Cloud Trust Config that contains the CA certificates used to validate client certificates
-2. **Client Certificates**: Clients must have valid certificates signed by a CA in your Trust Config
-3. **Server Certificates**: Your load balancer needs SSL certificates (existing requirement)
+1. **Certificate Map**: A Google Cloud Certificate Map containing your server SSL certificates
+2. **Trust Config Resource**: A Google Cloud Trust Config that references the CA certificates used to validate client certificates
+3. **Client Certificates**: Clients must have valid certificates signed by a CA in your Trust Config
 
 ## Module Changes
 
@@ -45,37 +45,199 @@ The module now includes the following new variables for mTLS support:
 
 ## Implementation Steps
 
-### Step 1: Create a Trust Config
+### Step 1: Create Certificate Map and Trust Config
 
-First, create a Trust Config in Google Cloud that contains your CA certificates:
+First, create a Certificate Map for your server certificates and a Trust Config that references your CA certificates in Certificate Manager.
+
+#### Option A: Using gcloud CLI
 
 ```bash
-# Create a trust config with your CA certificate
+# 1. Upload your server certificate to Certificate Manager
+gcloud certificate-manager certificates create my-server-cert \
+  --certificate-file=server-cert.pem \
+  --private-key-file=server-key.pem \
+  --location=global \
+  --project=your-project-id
+
+# 2. Create a certificate map
+gcloud certificate-manager maps create my-cert-map \
+  --location=global \
+  --project=your-project-id
+
+# 3. Add certificate to the map
+gcloud certificate-manager maps entries create my-cert-entry \
+  --map=my-cert-map \
+  --certificates=my-server-cert \
+  --hostname="*.example.com" \
+  --location=global \
+  --project=your-project-id
+
+# 4. Upload your CA certificate to Certificate Manager
+gcloud certificate-manager certificates create client-ca-cert \
+  --certificate-file=client-ca.pem \
+  --location=global \
+  --project=your-project-id
+
+# 5. Create a trust config that references the CA certificate
 gcloud certificate-manager trust-configs create my-trust-config \
-  --trust-store=trust-anchors=ca-certificate.pem \
+  --trust-store=trust-anchors=client-ca-cert \
   --location=global \
   --project=your-project-id
 ```
 
-Alternatively, create it using Terraform:
+#### Option B: Using Terraform
 
 ```hcl
-resource "google_certificate_manager_trust_config" "mtls_ca" {
-  name        = "my-mtls-trust-config"
+# 1. Create server certificate in Certificate Manager
+resource "google_certificate_manager_certificate" "server_cert" {
+  name        = "my-server-cert"
   location    = "global"
   project     = var.project_id
 
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/server-cert.pem")
+    pem_private_key = file("${path.module}/certificates/server-key.pem")
+  }
+}
+
+# 2. Create certificate map
+resource "google_certificate_manager_certificate_map" "cert_map" {
+  name     = "my-cert-map"
+  location = "global"
+  project  = var.project_id
+}
+
+# 3. Add certificate to the map
+resource "google_certificate_manager_certificate_map_entry" "cert_entry" {
+  name         = "my-cert-entry"
+  map          = google_certificate_manager_certificate_map.cert_map.name
+  location     = "global"
+  project      = var.project_id
+  certificates = [google_certificate_manager_certificate.server_cert.id]
+  hostname     = "*.example.com"
+}
+
+# 4. Create CA certificate in Certificate Manager
+resource "google_certificate_manager_certificate" "client_ca" {
+  name     = "client-ca-cert"
+  location = "global"
+  project  = var.project_id
+
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/client-ca.pem")
+  }
+}
+
+# 5. Create trust config that references the CA certificate
+resource "google_certificate_manager_trust_config" "mtls_ca" {
+  name     = "my-mtls-trust-config"
+  location = "global"
+  project  = var.project_id
+
   trust_stores {
     trust_anchors {
-      pem_certificate = file("path/to/ca-certificate.pem")
+      pem_certificate = google_certificate_manager_certificate.client_ca.id
     }
   }
+
+  description = "Trust config for validating client certificates"
 }
 ```
 
 ### Step 2: Update Your Load Balancer Configuration
 
-Add mTLS configuration to your existing load balancer module:
+Add mTLS configuration to your existing load balancer module. Note that we use `certificate_map` instead of `ssl_certificates`.
+
+#### Example with Existing Certificate Map (Recommended)
+
+If you already have a certificate map configured (common scenario), reference it using a data source:
+
+```hcl
+# Reference existing certificate map
+data "google_certificate_manager_certificate_map" "existing_cert_map" {
+  name     = "my-existing-cert-map"
+  location = "global"
+  project  = "my-project-id"
+}
+
+# Create only the Trust Config for mTLS
+resource "google_certificate_manager_certificate" "client_ca" {
+  name     = "client-ca-cert"
+  location = "global"
+  project  = "my-project-id"
+
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/client-ca.pem")
+  }
+}
+
+resource "google_certificate_manager_trust_config" "mtls_ca" {
+  name     = "my-mtls-trust-config"
+  location = "global"
+  project  = "my-project-id"
+
+  trust_stores {
+    trust_anchors {
+      pem_certificate = google_certificate_manager_certificate.client_ca.id
+    }
+  }
+
+  description = "Trust config for validating client certificates"
+}
+
+# Configure load balancer with existing certificate map
+module "load_balancer_with_mtls" {
+  source = "github.com/lucidworks/terraform-google-lb-http"
+
+  name                  = "my-secure-lb"
+  project               = "my-project-id"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+
+  # SSL configuration using existing Certificate Map
+  ssl             = true
+  certificate_map = data.google_certificate_manager_certificate_map.existing_cert_map.id
+
+  # mTLS configuration - references Trust Config
+  enable_mtls                     = true
+  mtls_trust_config              = google_certificate_manager_trust_config.mtls_ca.id
+  mtls_client_validation_mode    = "REJECT_INVALID"
+
+  # Optional: custom policy name
+  mtls_policy_name = "my-custom-mtls-policy"
+
+  # Your backends configuration
+  backends = {
+    default = {
+      protocol  = "HTTP"
+      port      = 80
+      port_name = "http"
+
+      health_check = {
+        protocol           = "HTTP"
+        port               = 80
+        request_path       = "/health"
+        check_interval_sec = 5
+        timeout_sec        = 5
+      }
+
+      log_config = {
+        enable      = true
+        sample_rate = 1.0
+      }
+
+      groups = []
+
+      iap_config = {
+        enable = false
+      }
+    }
+  }
+}
+```
+
+#### Example Creating New Certificate Map
+
+If you need to create a new certificate map:
 
 ```hcl
 module "load_balancer_with_mtls" {
@@ -85,14 +247,11 @@ module "load_balancer_with_mtls" {
   project               = "my-project-id"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 
-  # Standard SSL configuration (required)
-  ssl                  = true
-  use_ssl_certificates = true
-  ssl_certificates     = [
-    google_compute_ssl_certificate.my_cert.name
-  ]
+  # SSL configuration using Certificate Map
+  ssl             = true
+  certificate_map = google_certificate_manager_certificate_map.cert_map.id
 
-  # mTLS configuration
+  # mTLS configuration - references Trust Config
   enable_mtls                     = true
   mtls_trust_config              = google_certificate_manager_trust_config.mtls_ca.id
   mtls_client_validation_mode    = "REJECT_INVALID"
@@ -138,9 +297,11 @@ terraform plan
 terraform apply
 ```
 
-## Complete Example
+## Complete Examples
 
-Here's a complete example combining all components:
+### Example 1: Using Existing Certificate Map (Most Common)
+
+This example shows the recommended approach when you already have a certificate map configured:
 
 ```hcl
 # Define local variables
@@ -150,7 +311,25 @@ locals {
   region       = "us-central1"
 }
 
-# Create Trust Config for mTLS
+# Reference existing certificate map (already configured for your domain)
+data "google_certificate_manager_certificate_map" "existing" {
+  name     = "existing-cert-map"
+  location = "global"
+  project  = local.project_id
+}
+
+# Create CA certificate for client validation
+resource "google_certificate_manager_certificate" "client_ca" {
+  name     = "client-ca-certificate"
+  location = "global"
+  project  = local.project_id
+
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/client-ca.pem")
+  }
+}
+
+# Create Trust Config that references the CA certificate
 resource "google_certificate_manager_trust_config" "client_ca" {
   name     = "client-ca-trust-config"
   location = "global"
@@ -158,22 +337,14 @@ resource "google_certificate_manager_trust_config" "client_ca" {
 
   trust_stores {
     trust_anchors {
-      pem_certificate = file("${path.module}/certificates/client-ca.pem")
+      pem_certificate = google_certificate_manager_certificate.client_ca.id
     }
   }
 
   description = "Trust config for validating client certificates"
 }
 
-# Create or reference your server SSL certificate
-resource "google_compute_ssl_certificate" "server_cert" {
-  name        = "my-server-certificate"
-  project     = local.project_id
-  private_key = file("${path.module}/certificates/server-key.pem")
-  certificate = file("${path.module}/certificates/server-cert.pem")
-}
-
-# Create load balancer with mTLS
+# Create load balancer with mTLS using existing certificate map
 module "mtls_load_balancer" {
   source = "github.com/lucidworks/terraform-google-lb-http"
 
@@ -184,14 +355,153 @@ module "mtls_load_balancer" {
   http_forward          = true
   load_balancing_scheme = "EXTERNAL_MANAGED"
 
-  # SSL Configuration
-  ssl                  = true
-  use_ssl_certificates = true
-  ssl_certificates     = [
-    google_compute_ssl_certificate.server_cert.name
+  # SSL Configuration using existing Certificate Map
+  ssl             = true
+  certificate_map = data.google_certificate_manager_certificate_map.existing.id
+
+  # mTLS Configuration - references Trust Config
+  enable_mtls                  = true
+  mtls_trust_config           = google_certificate_manager_trust_config.client_ca.id
+  mtls_client_validation_mode = "REJECT_INVALID"
+  mtls_policy_name            = "my-mtls-policy"
+
+  # Firewall configuration
+  firewall_networks = [
+    "${local.project_id}-${local.cluster_name}"
   ]
 
-  # mTLS Configuration
+  # Backend services
+  backends = {
+    api-service = {
+      description                     = "API Service Backend"
+      protocol                        = "HTTP"
+      port                            = 8080
+      port_name                       = "http"
+      timeout_sec                     = 30
+      connection_draining_timeout_sec = 60
+      enable_cdn                      = false
+      session_affinity                = "CLIENT_IP"
+
+      health_check = {
+        protocol            = "HTTP"
+        check_interval_sec  = 10
+        timeout_sec         = 5
+        healthy_threshold   = 2
+        unhealthy_threshold = 2
+        port                = 8080
+        request_path        = "/healthz"
+        logging             = true
+      }
+
+      log_config = {
+        enable      = true
+        sample_rate = 1.0
+      }
+
+      groups = []
+
+      iap_config = {
+        enable = false
+      }
+    }
+  }
+}
+
+# Outputs
+output "load_balancer_ip" {
+  description = "Load balancer external IP"
+  value       = module.mtls_load_balancer.external_ip
+}
+
+output "mtls_enabled" {
+  description = "mTLS status"
+  value       = module.mtls_load_balancer.mtls_enabled
+}
+```
+
+### Example 2: Creating All Resources from Scratch
+
+Here's a complete example combining all components using Certificate Manager:
+
+```hcl
+# Define local variables
+locals {
+  project_id   = "my-project-id"
+  cluster_name = "my-cluster"
+  region       = "us-central1"
+}
+
+# 1. Create server certificate in Certificate Manager
+resource "google_certificate_manager_certificate" "server_cert" {
+  name     = "server-certificate"
+  location = "global"
+  project  = local.project_id
+
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/server-cert.pem")
+    pem_private_key = file("${path.module}/certificates/server-key.pem")
+  }
+}
+
+# 2. Create certificate map for server certificates
+resource "google_certificate_manager_certificate_map" "lb_cert_map" {
+  name     = "lb-certificate-map"
+  location = "global"
+  project  = local.project_id
+}
+
+# 3. Add server certificate to the map
+resource "google_certificate_manager_certificate_map_entry" "primary" {
+  name         = "primary-cert-entry"
+  map          = google_certificate_manager_certificate_map.lb_cert_map.name
+  location     = "global"
+  project      = local.project_id
+  certificates = [google_certificate_manager_certificate.server_cert.id]
+  hostname     = "*.example.com"
+}
+
+# 4. Create CA certificate for client validation
+resource "google_certificate_manager_certificate" "client_ca" {
+  name     = "client-ca-certificate"
+  location = "global"
+  project  = local.project_id
+
+  self_managed {
+    pem_certificate = file("${path.module}/certificates/client-ca.pem")
+  }
+}
+
+# 5. Create Trust Config that references the CA certificate
+resource "google_certificate_manager_trust_config" "client_ca" {
+  name     = "client-ca-trust-config"
+  location = "global"
+  project  = local.project_id
+
+  trust_stores {
+    trust_anchors {
+      pem_certificate = google_certificate_manager_certificate.client_ca.id
+    }
+  }
+
+  description = "Trust config for validating client certificates"
+}
+
+# 6. Create load balancer with mTLS
+module "mtls_load_balancer" {
+  source = "github.com/lucidworks/terraform-google-lb-http"
+
+  name                  = "mtls-enabled-lb"
+  project               = local.project_id
+  enable_ipv6           = false
+  create_ipv6_address   = false
+  http_forward          = true
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+
+  # SSL Configuration using Certificate Map
+  ssl             = true
+  certificate_map = google_certificate_manager_certificate_map.lb_cert_map.id
+
+  # mTLS Configuration - references Trust Config
   enable_mtls                  = true
   mtls_trust_config           = google_certificate_manager_trust_config.client_ca.id
   mtls_client_validation_mode = "REJECT_INVALID"
