@@ -49,3 +49,13 @@ output "url_map" {
   description = "The default URL map used by this module."
   value       = google_compute_url_map.default[*].self_link
 }
+
+output "mtls_policy" {
+  description = "The mTLS server TLS policy resource."
+  value       = var.enable_mtls ? google_compute_region_server_tls_policy.mtls_policy[0] : null
+}
+
+output "mtls_enabled" {
+  description = "Whether mTLS is enabled on this load balancer."
+  value       = var.enable_mtls
+}

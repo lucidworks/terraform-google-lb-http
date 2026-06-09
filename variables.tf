@@ -278,3 +278,37 @@ variable "network" {
   type        = string
   default     = "default"
 }
+
+variable "enable_mtls" {
+  description = "Enable mutual TLS (mTLS) authentication"
+  type        = bool
+  default     = false
+}
+
+variable "mtls_policy_name" {
+  description = "Name for the server TLS policy when mTLS is enabled"
+  type        = string
+  default     = null
+}
+
+variable "mtls_trust_config" {
+  description = "Trust config resource name for mTLS client certificate validation. Format: projects/{project}/locations/{location}/trustConfigs/{name}"
+  type        = string
+  default     = null
+}
+
+variable "mtls_client_validation_mode" {
+  description = "Client certificate validation mode. Valid values: ALLOW_INVALID_OR_MISSING_CLIENT_CERT, REJECT_INVALID"
+  type        = string
+  default     = "REJECT_INVALID"
+  validation {
+    condition     = var.mtls_client_validation_mode == null || contains(["ALLOW_INVALID_OR_MISSING_CLIENT_CERT", "REJECT_INVALID"], var.mtls_client_validation_mode)
+    error_message = "mtls_client_validation_mode must be either ALLOW_INVALID_OR_MISSING_CLIENT_CERT or REJECT_INVALID"
+  }
+}
+
+variable "mtls_client_validation_trust_config" {
+  description = "Alternative trust config for client validation. If not specified, mtls_trust_config will be used"
+  type        = string
+  default     = null
+}
