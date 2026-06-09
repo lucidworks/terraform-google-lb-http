@@ -23,8 +23,25 @@ This is particularly useful for:
 Before implementing mTLS, you need:
 
 1. **Certificate Map**: A Google Cloud Certificate Map containing your server SSL certificates
-2. **Trust Config Resource**: A Google Cloud Trust Config that references the CA certificates used to validate client certificates
-3. **Client Certificates**: Clients must have valid certificates signed by a CA in your Trust Config
+2. **CA Certificate in Secret Manager**: Your client CA certificate stored as a secret in Google Cloud Secret Manager
+3. **Trust Config Resource**: A Google Cloud Trust Config that references the CA certificates used to validate client certificates
+4. **Client Certificates**: Clients must have valid certificates signed by a CA in your Trust Config
+
+### Storing CA Certificate in Secret Manager
+
+First, upload your client CA certificate to Secret Manager:
+
+```bash
+# Create a secret with your CA certificate
+gcloud secrets create client-ca-certificate \
+  --data-file=client-ca.pem \
+  --project=your-project-id
+
+# Or if the secret already exists, add a new version
+gcloud secrets versions add client-ca-certificate \
+  --data-file=client-ca.pem \
+  --project=your-project-id
+```
 
 ## Module Changes
 
@@ -72,15 +89,15 @@ gcloud certificate-manager maps entries create my-cert-entry \
   --location=global \
   --project=your-project-id
 
-# 4. Upload your CA certificate to Certificate Manager
-gcloud certificate-manager certificates create client-ca-cert \
-  --certificate-file=client-ca.pem \
-  --location=global \
-  --project=your-project-id
+# 4. Create a trust config with CA certificate from Secret Manager
+# Retrieve the certificate content from Secret Manager
+CA_CERT=$(gcloud secrets versions access latest \
+  --secret=client-ca-certificate \
+  --project=your-project-id)
 
-# 5. Create a trust config that references the CA certificate
+# Create trust config with the certificate content
 gcloud certificate-manager trust-configs create my-trust-config \
-  --trust-store=trust-anchors=client-ca-cert \
+  --trust-store=trust-anchors="$CA_CERT" \
   --location=global \
   --project=your-project-id
 ```
@@ -117,18 +134,13 @@ resource "google_certificate_manager_certificate_map_entry" "cert_entry" {
   hostname     = "*.example.com"
 }
 
-# 4. Create CA certificate in Certificate Manager
-resource "google_certificate_manager_certificate" "client_ca" {
-  name     = "client-ca-cert"
-  location = "global"
-  project  = var.project_id
-
-  self_managed {
-    pem_certificate = file("${path.module}/certificates/client-ca.pem")
-  }
+# 4. Create trust config with CA certificate from Secret Manager
+# Note: Trust configs require PEM content - we retrieve it from Secret Manager
+data "google_secret_manager_secret_version" "client_ca_cert" {
+  secret  = "client-ca-certificate"  # Name of your secret in Secret Manager
+  project = var.project_id
 }
 
-# 5. Create trust config that references the CA certificate
 resource "google_certificate_manager_trust_config" "mtls_ca" {
   name     = "my-mtls-trust-config"
   location = "global"
@@ -136,7 +148,7 @@ resource "google_certificate_manager_trust_config" "mtls_ca" {
 
   trust_stores {
     trust_anchors {
-      pem_certificate = google_certificate_manager_certificate.client_ca.id
+      pem_certificate = data.google_secret_manager_secret_version.client_ca_cert.secret_data
     }
   }
 
@@ -160,17 +172,13 @@ data "google_certificate_manager_certificate_map" "existing_cert_map" {
   project  = "my-project-id"
 }
 
-# Create only the Trust Config for mTLS
-resource "google_certificate_manager_certificate" "client_ca" {
-  name     = "client-ca-cert"
-  location = "global"
-  project  = "my-project-id"
-
-  self_managed {
-    pem_certificate = file("${path.module}/certificates/client-ca.pem")
-  }
+# Retrieve CA certificate from Secret Manager
+data "google_secret_manager_secret_version" "client_ca_cert" {
+  secret  = "client-ca-certificate"  # Your secret name in Secret Manager
+  project = "my-project-id"
 }
 
+# Create the Trust Config for mTLS client validation
 resource "google_certificate_manager_trust_config" "mtls_ca" {
   name     = "my-mtls-trust-config"
   location = "global"
@@ -178,7 +186,7 @@ resource "google_certificate_manager_trust_config" "mtls_ca" {
 
   trust_stores {
     trust_anchors {
-      pem_certificate = google_certificate_manager_certificate.client_ca.id
+      pem_certificate = data.google_secret_manager_secret_version.client_ca_cert.secret_data
     }
   }
 
@@ -318,18 +326,13 @@ data "google_certificate_manager_certificate_map" "existing" {
   project  = local.project_id
 }
 
-# Create CA certificate for client validation
-resource "google_certificate_manager_certificate" "client_ca" {
-  name     = "client-ca-certificate"
-  location = "global"
-  project  = local.project_id
-
-  self_managed {
-    pem_certificate = file("${path.module}/certificates/client-ca.pem")
-  }
+# Retrieve CA certificate from Secret Manager
+data "google_secret_manager_secret_version" "client_ca_cert" {
+  secret  = "client-ca-certificate"
+  project = local.project_id
 }
 
-# Create Trust Config that references the CA certificate
+# Create Trust Config with CA certificate for client validation
 resource "google_certificate_manager_trust_config" "client_ca" {
   name     = "client-ca-trust-config"
   location = "global"
@@ -337,7 +340,7 @@ resource "google_certificate_manager_trust_config" "client_ca" {
 
   trust_stores {
     trust_anchors {
-      pem_certificate = google_certificate_manager_certificate.client_ca.id
+      pem_certificate = data.google_secret_manager_secret_version.client_ca_cert.secret_data
     }
   }
 
@@ -460,18 +463,13 @@ resource "google_certificate_manager_certificate_map_entry" "primary" {
   hostname     = "*.example.com"
 }
 
-# 4. Create CA certificate for client validation
-resource "google_certificate_manager_certificate" "client_ca" {
-  name     = "client-ca-certificate"
-  location = "global"
-  project  = local.project_id
-
-  self_managed {
-    pem_certificate = file("${path.module}/certificates/client-ca.pem")
-  }
+# 4. Retrieve CA certificate from Secret Manager
+data "google_secret_manager_secret_version" "client_ca_cert" {
+  secret  = "client-ca-certificate"
+  project = local.project_id
 }
 
-# 5. Create Trust Config that references the CA certificate
+# 5. Create Trust Config with CA certificate for client validation
 resource "google_certificate_manager_trust_config" "client_ca" {
   name     = "client-ca-trust-config"
   location = "global"
@@ -479,7 +477,7 @@ resource "google_certificate_manager_trust_config" "client_ca" {
 
   trust_stores {
     trust_anchors {
-      pem_certificate = google_certificate_manager_certificate.client_ca.id
+      pem_certificate = data.google_secret_manager_secret_version.client_ca_cert.secret_data
     }
   }
 
