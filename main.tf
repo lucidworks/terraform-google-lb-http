@@ -117,10 +117,15 @@ resource "google_compute_target_https_proxy" "default" {
   name    = "${var.name}-https-proxy"
   url_map = local.url_map
 
-  ssl_certificates = compact(concat(var.ssl_certificates, google_compute_ssl_certificate.default.*.self_link, google_compute_managed_ssl_certificate.default.*.self_link, ), )
-  certificate_map  = var.certificate_map != null ? "//certificatemanager.googleapis.com/${var.certificate_map}" : null
-  ssl_policy       = var.ssl_policy
-  quic_override    = var.quic == null ? "NONE" : var.quic ? "ENABLE" : "DISABLE"
+  ssl_certificates   = compact(concat(var.ssl_certificates, google_compute_ssl_certificate.default.*.self_link, google_compute_managed_ssl_certificate.default.*.self_link, ), )
+  certificate_map    = var.certificate_map != null ? "//certificatemanager.googleapis.com/${var.certificate_map}" : null
+  ssl_policy         = var.ssl_policy
+  quic_override      = var.quic == null ? "NONE" : var.quic ? "ENABLE" : "DISABLE"
+  server_tls_policy  = var.enable_mtls ? google_compute_region_server_tls_policy.mtls_policy[0].id : null
+
+  depends_on = [
+    google_compute_region_server_tls_policy.mtls_policy
+  ]
 }
 
 resource "google_compute_ssl_certificate" "default" {
@@ -398,6 +403,25 @@ resource "google_compute_health_check" "default" {
       port_specification = lookup(tcp_health_check.value, "port_specification", null)
     }
   }
+}
+
+# Server TLS Policy for mTLS
+resource "google_compute_region_server_tls_policy" "mtls_policy" {
+  provider = google-beta
+  count    = var.enable_mtls ? 1 : 0
+  project  = var.project
+  name     = coalesce(var.mtls_policy_name, "${var.name}-mtls-policy")
+  location = "global"
+
+  mtls_policy {
+    client_validation_mode = var.mtls_client_validation_mode
+    client_validation_trust_config = coalesce(
+      var.mtls_client_validation_trust_config,
+      var.mtls_trust_config
+    )
+  }
+
+  labels = var.labels
 }
 
 resource "google_compute_firewall" "default-hc" {
